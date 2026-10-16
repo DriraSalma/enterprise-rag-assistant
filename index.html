@@ -1,0 +1,329 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ClinicSys HTH-RAG Assistant</title>
+    <!-- Chargement rapide de Tailwind CSS pour un design moderne -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        ::-webkit-scrollbar { width: 6px; }
+        ::-webkit-scrollbar-track { background: #f1f1f1; }
+        ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 10px; }
+        ::-webkit-scrollbar-thumb:hover { background: #94a3b8; }
+    </style>
+</head>
+<body class="bg-slate-50 h-screen flex flex-col font-sans">
+
+    <!-- En-tête de l'interface -->
+    <header class="bg-slate-800 text-white p-4 shadow-md flex justify-between items-center shrink-0">
+        <h1 class="text-lg font-bold flex items-center gap-2">
+            💬 ClinicSys - Assistant de Formation Clinique
+        </h1>
+        <span class="text-xs bg-emerald-500 text-white px-2.5 py-1 rounded-full font-semibold animate-pulse">
+            HTH-RAG API active
+        </span>
+    </header>
+
+    <!-- Zone de discussion (Chat) -->
+    <main id="chat-container" class="flex-1 overflow-y-auto p-4 space-y-4 max-w-4xl mx-auto w-full">
+        <!-- Message de bienvenue de l'IA -->
+        <div class="flex items-start gap-3">
+            <div class="bg-slate-700 text-white rounded-full w-8 h-8 flex items-center justify-center font-bold text-xs shrink-0">AI</div>
+            <div class="bg-white p-3.5 rounded-lg shadow-sm border border-slate-100 max-w-[80%] text-slate-800 text-sm leading-relaxed">
+                Bonjour ! Je suis votre assistant ClinicSys. Posez-moi vos questions techniques sur l'utilisation de nos logiciels cliniques.
+            </div>
+        </div>
+    </main>
+
+    <!-- Zone d'écriture en bas de page -->
+    <footer class="bg-white border-t border-slate-200 p-4 sticky bottom-0 shrink-0">
+        <div class="max-w-4xl mx-auto flex gap-3">
+            <input id="user-input" type="text" placeholder="Posez votre question technique ici (ex: Que signifie la mention BMR ?)..." 
+                   class="flex-1 border border-slate-300 rounded-lg px-4 py-2.5 text-sm focus:outline-none focus:border-slate-500 transition-colors shadow-sm">
+            <button id="send-btn" class="bg-slate-800 text-white px-6 py-2.5 rounded-lg text-sm font-semibold hover:bg-slate-700 transition-colors shadow-sm">
+                Envoyer
+            </button>
+        </div>
+    </footer>
+
+    <script>
+        const chatContainer = document.getElementById('chat-container');
+        const userInput = document.getElementById('user-input');
+        const sendBtn = document.getElementById('send-btn');
+        
+        let abortController = null; // Contrôleur pour annuler la requête réseau
+        let generating = false;     // Variable d'état de génération
+        let chatHistory = []; 
+     // Fonction de lecture asynchrone du flux HTTP (Streaming optimisé sans latence)
+async function sendMessage() { 
+    if (generating) { 
+        stopGeneration(); 
+        return; 
+    } 
+    
+    const question = userInput.value.trim(); 
+    if (!question) return; 
+    
+    userInput.value = ''; 
+    appendMessage('user', question); 
+     // 1. Enregistrer le message de l'utilisateur dans l'historique local
+    chatHistory.push({ role: "user", content: question });
+    const loadingId = appendLoadingIndicator(); 
+    chatContainer.scrollTop = chatContainer.scrollHeight; 
+    
+    setGeneratingState(true); 
+    abortController = new AbortController(); 
+    
+    try { 
+        const response = await fetch('http://127.0.0.1:8000/query', { 
+            method: 'POST', 
+            headers: { 'Content-Type': 'application/json' }, 
+            body: JSON.stringify({ question: question ,history: chatHistory }), 
+            signal: abortController.signal
+            
+        }); 
+        
+        removeLoadingIndicator(loadingId); 
+        
+        if (!response.ok) { 
+            throw new Error(`Erreur serveur : ${response.status}`); 
+        } 
+        
+        const reader = response.body.getReader(); 
+        const decoder = new TextDecoder("utf-8"); 
+        let finished = false; 
+        let assistantText = ""; 
+        let sources = []; 
+        
+        // Créer une bulle d'assistant vide
+        const bubbleId = 'bubble-' + Date.now(); 
+        createEmptyAssistantBubble(bubbleId); 
+        
+        const bubbleTextElement = document.querySelector(`#${bubbleId} .bubble-text`); 
+        const bubbleImageElement = document.querySelector(`#${bubbleId} .image-container`); 
+        
+        while (!finished) { 
+            const { value, done } = await reader.read(); 
+            if (done) { 
+                finished = true; 
+                break; 
+            } 
+            
+            const chunk = decoder.decode(value, { stream: true }); 
+            
+            if (chunk.includes("[SOURCES]:")) { 
+                const lignes = chunk.split("\n"); 
+                const ligneSource = lignes.find(l => l.startsWith("[SOURCES]:")); 
+                if (ligneSource) { 
+                    const jsonStr = ligneSource.replace("[SOURCES]:", ""); 
+                    sources = JSON.parse(jsonStr); 
+                    // CORRECTION : On extrait et stocke simplement les sources en mémoire ici.
+                    // On supprime l'affichage immédiat de l'image.
+                } 
+                
+                const autresLignes = lignes.filter(l => !l.startsWith("[SOURCES]:")); 
+                if (autresLignes.length > 0) { 
+                    assistantText += autresLignes.join("\n"); 
+                } 
+            } else { 
+                assistantText += chunk; 
+            } 
+            
+            // Mise à jour du texte en direct
+            bubbleTextElement.innerText = assistantText; 
+            chatContainer.scrollTop = chatContainer.scrollHeight; 
+        } 
+
+         // 2. Enregistrer la réponse finale de l'assistant dans l'historique local
+        chatHistory.push({ role: "assistant", content: assistantText });
+
+      // RENDU DE FIN DE FLUX : Affichage des sources et de l'image de manière ergonomique
+        // CORRECTIF : On n'affiche les sources et l'image QUE si le chatbot a trouvé l'information (pas de fallback)
+        const pasTrouve = assistantText.includes("Je ne trouve pas l'information") || sources.length === 0;
+
+        if (sources.length > 0 && !pasTrouve) {
+            let sourcesHTML = `
+                <div class="mt-4 border-t border-slate-150 pt-3">
+                    <span class="text-xs text-slate-500 font-bold block mb-2">📄 Documents de référence :</span>
+                    <div class="flex flex-wrap gap-2 text-xs">
+            `;
+            
+            // Dédoublonner les sources
+            const sourcesUniques = [];
+            const clesVisitees = new Set();
+            
+            sources.forEach(s => {
+                const cle = `${s.file_name}-${s.step_id}`;
+                if (!clesVisitees.has(cle)) {
+                    clesVisitees.add(cle);
+                    sourcesUniques.push(s);
+                }
+            });
+
+            // Générer un badge élégant pour chaque source unique
+            sourcesUniques.forEach((src, idx) => {
+                const nomPropre = src.file_name
+                    .replace('.json', '')
+                    .replace('.txt', '')
+                    .replace(/[-_]/g, ' ');
+
+                sourcesHTML += `
+                    <div class="flex items-center gap-1.5 bg-slate-100 text-slate-700 border border-slate-200 px-2.5 py-1 rounded-md shadow-sm">
+                        <span class="bg-slate-800 text-white rounded px-1.5 py-0.5 text-[10px] font-bold">[${idx + 1}]</span>
+                        <span class="font-semibold capitalize">${nomPropre}</span>
+                        <span class="text-slate-400">|</span>
+                        <span class="text-slate-500 text-[11px]">Réf : ${src.step_id}</span>
+                    </div>
+                `;
+            });
+
+            sourcesHTML += `</div></div>`;
+
+            // Si une capture d'écran est disponible, on l'affiche proprement en dessous
+            if (sources[0].image_path) {
+                sourcesHTML += `
+                    <div class="mt-4 border-t border-slate-150 pt-3">
+                        <span class="text-xs text-slate-500 font-bold block mb-2">📸 Capture d'écran associée :</span>
+                        <img src="${sources[0].image_path}" alt="Support visuel" 
+                             class="rounded-lg border border-slate-200 shadow-md max-w-full h-auto object-contain max-h-80 hover:scale-[1.02] transition-transform duration-200 cursor-zoom-in">
+                    </div>
+                `;
+            }
+
+            bubbleImageElement.innerHTML = sourcesHTML;
+            chatContainer.scrollTop = chatContainer.scrollHeight;
+        } else {
+            // Si l'information n'a pas été trouvée, on vide le conteneur d'image pour ne rien afficher d'inutile
+            bubbleImageElement.innerHTML = "";
+        }
+
+    } catch (error) { 
+        removeLoadingIndicator(loadingId); 
+        if (error.name === 'AbortError') { 
+            appendMessage('assistant', `Génération interrompue par l'utilisateur.`); 
+        } else { 
+            appendMessage('assistant', `Erreur de connexion : Impossible de joindre l'API. Assurez-vous d'avoir lancé "uvicorn api:app" et "ollama serve" en arrière-plan.`); 
+        } 
+        console.error(error); 
+    } finally { 
+        setGeneratingState(false); 
+        chatContainer.scrollTop = chatContainer.scrollHeight; 
+    } 
+}
+
+        // Fonction pour annuler la requête de génération en cours
+        function stopGeneration() {
+            if (abortController) {
+                abortController.abort(); // Annule la requête fetch en cours
+            }
+        }
+
+        // Gérer visuellement le changement d'état du bouton "Envoyer / Arrêter"
+        function setGeneratingState(isGenerating) {
+            generating = isGenerating;
+            if (isGenerating) {
+                sendBtn.innerText = "Arrêter";
+                sendBtn.className = "bg-rose-600 text-white px-6 py-2.5 rounded-lg text-sm font-semibold hover:bg-rose-500 transition-colors shadow-sm";
+                userInput.disabled = true;
+                userInput.className = "flex-1 border border-slate-200 bg-slate-100 text-slate-400 rounded-lg px-4 py-2.5 text-sm focus:outline-none cursor-not-allowed shadow-sm";
+            } else {
+                sendBtn.innerText = "Envoyer";
+                sendBtn.className = "bg-slate-800 text-white px-6 py-2.5 rounded-lg text-sm font-semibold hover:bg-slate-700 transition-colors shadow-sm";
+                userInput.disabled = false;
+                userInput.className = "flex-1 border border-slate-300 rounded-lg px-4 py-2.5 text-sm focus:outline-none focus:border-slate-500 transition-colors shadow-sm";
+                userInput.focus();
+            }
+        }
+
+        // Fonction pour créer une bulle de chat vide prête à accueillir le flux
+      function createEmptyAssistantBubble(id) {
+    const messageDiv = document.createElement('div');
+    messageDiv.id = id;
+    messageDiv.className = 'flex items-start gap-3';
+    messageDiv.innerHTML = `
+        <div class="bg-slate-700 text-white rounded-full w-8 h-8 flex items-center justify-center font-bold text-xs shrink-0">AI</div>
+        <div class="bg-white text-slate-800 border border-slate-200 rounded-bl-none p-3.5 rounded-lg shadow-sm max-w-[85%] text-sm space-y-3">
+            <div class="bubble-text whitespace-pre-line leading-relaxed">
+                <!-- Trois petits points animés de 6px (h-1.5 w-1.5) avec des classes Tailwind standard et visibles -->
+                <div class="flex items-center gap-1 py-1" id="${id}-typing">
+                    <span class="h-1.5 w-1.5 bg-slate-400 rounded-full animate-bounce [animation-delay:-0.3s]"></span>
+                    <span class="h-1.5 w-1.5 bg-slate-400 rounded-full animate-bounce [animation-delay:-0.15s]"></span>
+                    <span class="h-1.5 w-1.5 bg-slate-400 rounded-full animate-bounce"></span>
+                </div>
+            </div>
+            <div class="image-container"></div>
+        </div>
+    `;
+    chatContainer.appendChild(messageDiv);
+}
+
+        function appendMessage(role, text, sources = []) {
+            const isUser = role === 'user';
+            const messageDiv = document.createElement('div');
+            messageDiv.className = `flex items-start gap-3 ${isUser ? 'justify-end' : ''}`;
+
+            let avatar = isUser ? 'VOUS' : 'AI';
+            let avatarClass = isUser ? 'bg-slate-500' : 'bg-slate-700';
+            let bubbleClass = isUser ? 'bg-slate-800 text-white rounded-br-none' : 'bg-white text-slate-800 border border-slate-200 rounded-bl-none';
+
+            let htmlContent = `
+                ${!isUser ? `<div class="${avatarClass} text-white rounded-full w-8 h-8 flex items-center justify-center font-bold text-xs shrink-0">${avatar}</div>` : ''}
+                <div class="${bubbleClass} p-3.5 rounded-lg shadow-sm max-w-[85%] text-sm space-y-3">
+                    <p class="whitespace-pre-line leading-relaxed">${text}</p>
+            `;
+
+            if (!isUser && sources && sources.length > 0) {
+                const meilleureSource = sources[0];
+                if (meilleureSource && meilleureSource.image_path) {
+                    htmlContent += `
+                        <div class="mt-3 border-t border-slate-100 pt-3">
+                            <span class="text-xs text-slate-400 block mb-2 font-medium">Capture associée : ${meilleureSource.image_path}</span>
+                            <img src="${meilleureSource.image_path}" alt="Support visuel" class="rounded border border-slate-200 shadow-sm max-w-full h-auto object-contain max-h-80">
+                        </div>
+                    `;
+                }
+            }
+
+            htmlContent += `
+                </div>
+                ${isUser ? `<div class="${avatarClass} text-white rounded-full w-8 h-8 flex items-center justify-center font-bold text-xs shrink-0">${avatar}</div>` : ''}
+            `;
+
+            messageDiv.innerHTML = htmlContent;
+            chatContainer.appendChild(messageDiv);
+        }
+
+       function appendLoadingIndicator() {
+    const id = 'loading-' + Date.now();
+    const loadingDiv = document.createElement('div');
+    loadingDiv.id = id;
+    loadingDiv.className = 'flex items-start gap-3';
+    loadingDiv.innerHTML = `
+        <div class="bg-slate-700 text-white rounded-full w-8 h-8 flex items-center justify-center font-bold text-xs shrink-0">AI</div>
+        <div class="bg-white p-3.5 rounded-lg shadow-sm border border-slate-200 text-slate-400 text-sm flex items-center gap-2">
+            <!-- Icône de reload (flèche circulaire) animée avec animate-spin -->
+            <svg class="animate-spin h-4 w-4 text-slate-750" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5">
+                <path stroke-linecap="round" stroke-linejoin="round" d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0l3.181 3.183a8.25 8.25 0 0013.803-3.7M4.031 9.865a8.25 8.25 0 0113.803-3.7l3.181 3.182m0-4.991v4.99" />
+            </svg>
+            Recherche et génération sémantique...
+        </div>
+    `;
+    chatContainer.appendChild(loadingDiv);
+    return id;
+}
+
+        // Suppression de l'indicateur de chargement
+        function removeLoadingIndicator(id) {
+            const indicator = document.getElementById(id);
+            if (indicator) indicator.remove();
+        }
+
+        // Événements d'envoi et de soumission par Entrée
+        sendBtn.addEventListener('click', sendMessage);
+        userInput.addEventListener('keypress', (e) => {
+            if (e.key === 'Enter') sendMessage();
+        });
+    </script>
+</body>
+</html>
